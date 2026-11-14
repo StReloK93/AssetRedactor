@@ -16,13 +16,22 @@ export function loadSettings<S>(storageKey: string, defaults: S, merge: (default
 
 /** How long the settings must rest before they are saved in the browser */
 const SAVE_MS = 400
+/** ...and on disk (saves/ in the project) */
+const DISK_SAVE_MS = 1500
 
 /**
  * The page side of a studio: sends the (reactive) settings to its worker on every change, keeps the sprites it
- * sends back, remembers the settings and writes the set into the game's sprite folder. `focus` names the sprite
- * being edited: the worker builds it first.
+ * sends back, remembers the settings (in the browser, and on disk in saves/) and writes the set into the game's
+ * sprite folder. `focus` names the sprite being edited: the worker builds it first.
  */
-export function useSpriteSet<S extends object, M>(worker: Worker, settings: S, storageKey: string, focus?: () => string | undefined) {
+export function useSpriteSet<S extends object, M>(
+  worker: Worker,
+  settings: S,
+  storageKey: string,
+  focus?: () => string | undefined,
+  /** Puts saved settings (from disk, when the browser has none) into place */
+  restore?: (saved: Partial<S>) => void,
+) {
   const sprites = shallowRef<BuiltSprite<M>[]>([])
   /** Something is still being built */
   const building = ref(false)
@@ -95,6 +104,57 @@ export function useSpriteSet<S extends object, M>(worker: Worker, settings: S, s
   // A slider fires many changes a frame: send one request per frame, save once they rest
   let frame = 0
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let diskTimer: ReturnType<typeof setTimeout> | undefined
+  /** Changes not yet in the browser's storage / not yet on disk */
+  let unsaved = false
+  let unsavedOnDisk = false
+  /** Where the work is kept: 'saved' once it is on disk too */
+  const saveState = ref<'saved' | 'saving' | 'browser-only'>('saved')
+
+  function saveToBrowser(): void {
+    clearTimeout(saveTimer)
+    if (!unsaved) return
+    unsaved = false
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(settings))
+    } catch {
+      // Storage may be unavailable (private window): the disk copy still keeps it
+    }
+  }
+  /** The settings into saves/<key>.json through the studio's server, so they outlive the browser's storage */
+  async function saveToDisk(keepalive = false): Promise<void> {
+    clearTimeout(diskTimer)
+    if (!unsavedOnDisk) return
+    unsavedOnDisk = false
+    saveState.value = 'saving'
+    try {
+      const response = await fetch(`/api/save?name=${encodeURIComponent(storageKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+        keepalive,
+      })
+      if (!response.ok) throw new Error(response.statusText)
+      if (!unsavedOnDisk) saveState.value = 'saved'
+    } catch {
+      // No server (a built copy): the browser's storage still has it
+      if (!unsavedOnDisk) saveState.value = 'browser-only'
+    }
+  }
+  /** Everything not saved yet, now (the page is closing or reloading) */
+  function flush(): void {
+    saveToBrowser()
+    if (unsavedOnDisk) void saveToDisk(true)
+  }
+  window.addEventListener('pagehide', flush)
+  const onHidden = () => document.visibilityState === 'hidden' && flush()
+  document.addEventListener('visibilitychange', onHidden)
+  onBeforeUnmount(() => {
+    flush()
+    window.removeEventListener('pagehide', flush)
+    document.removeEventListener('visibilitychange', onHidden)
+  })
+
   watch(settings, () => {
     pending.value = true
     if (!frame) {
@@ -103,16 +163,35 @@ export function useSpriteSet<S extends object, M>(worker: Worker, settings: S, s
         rebuild()
       })
     }
+    unsaved = true
+    unsavedOnDisk = true
+    saveState.value = 'saving'
     clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(settings))
-      } catch {
-        // Storage may be unavailable (private window): the settings just are not remembered
-      }
-    }, SAVE_MS)
+    saveTimer = setTimeout(saveToBrowser, SAVE_MS)
+    clearTimeout(diskTimer)
+    diskTimer = setTimeout(() => void saveToDisk(), DISK_SAVE_MS)
   }, { deep: true })
   rebuild()
+
+  let inBrowser = false
+  try {
+    inBrowser = localStorage.getItem(storageKey) !== null
+  } catch {
+    // No storage
+  }
+  if (inBrowser) {
+    // Work the browser has goes to disk once at the start too (a set made before disk saves existed gets its copy)
+    unsavedOnDisk = true
+    void saveToDisk()
+  } else if (restore) {
+    // The browser has nothing (another browser, cleared data): bring back the disk's copy, never overwrite it
+    void fetch(`/api/save?name=${encodeURIComponent(storageKey)}`)
+      .then(response => (response.ok ? response.json() : null))
+      .then(saved => {
+        if (saved && typeof saved === 'object') restore(saved as Partial<S>)
+      })
+      .catch(() => {})
+  }
 
   /** Every sprite of the set into the game's sprite folder (the worker encodes the PNGs) */
   async function exportToGame(): Promise<void> {
@@ -138,5 +217,5 @@ export function useSpriteSet<S extends object, M>(worker: Worker, settings: S, s
     send({ type: 'build', id: ++requestId, settings: structuredClone(toRaw(settings)) as S, focus: focus?.() })
   }
 
-  return { sprites, building, pending, exportState, exportToGame, refocus }
+  return { sprites, building, pending, exportState, exportToGame, refocus, saveState }
 }

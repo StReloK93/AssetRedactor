@@ -1,9 +1,9 @@
 import { Rgb, hexToRgb } from '../core/color'
 import { seededRandom } from '../core/noise'
 import { CROWNS, crystal } from './crowns'
-import type { CrownId, Level, TowerDef, TowerShape, TowerTop } from './model'
+import type { CrownId, Level, Masonry, TowerDef, TowerShape, TowerTop } from './model'
 import { Light, Mat, Part, Wall, column } from './parts'
-import { aroundShape, extrude, length2, noise3, rotX, sdBox, sdEllipsoid, sdShape2, sdSphere, sdTaper, sdTorus, shapeRadius, shapeReach, shapeSides, smoothMin } from './sdf'
+import { aroundShape, extrude, length2, noise3, rotX, sdBox, sdCapsule, sdEllipsoid, sdShape2, sdSphere, sdTaper, sdTorus, shapeRadius, shapeReach, shapeSides, smoothMin } from './sdf'
 
 /**
  * A tower as a list of parts (see parts.ts), put together from its definition: a plinth, the body (one piece,
@@ -23,6 +23,10 @@ export interface Scene {
   magic: number
   runes: boolean
   cracks: boolean
+  /** What the walls are made of */
+  masonry: Masonry
+  /** Ivy on the walls */
+  vines: boolean
   /** Radius of the circle of runes on the ground round the tower (none if off) */
   circle: number | null
   colors: { stoneDark: Rgb; stoneLight: Rgb; trim: Rgb; accent: Rgb; glow: Rgb }
@@ -196,17 +200,25 @@ export function buildScene(def: TowerDef): Scene {
         slab(B, 0.048, zl - 0.03, zl, Mat.Plinth, cx, cy)
       }
       const outer = R + 0.045
+      // Battlements or a floor: open, the crown floating over the ring; any other top is built on the ring, closed
+      const open = def.top === 'battlements' || def.top === 'floor'
       parts.push({
         b: column(outer, zl, zl + 0.045, 0, 0, A),
-        d: (x, y, z) => Math.max(extrude(sdShape2(A, x, y, outer), z, zl, zl + 0.045), -sdShape2(A, x, y, outer - 0.09)),
+        d: open
+          ? (x, y, z) => Math.max(extrude(sdShape2(A, x, y, outer), z, zl, zl + 0.045), -sdShape2(A, x, y, outer - 0.09))
+          : (x, y, z) => extrude(sdShape2(A, x, y, outer), z, zl, zl + 0.045),
         m: Mat.Stone,
         w: { shape: A, cx: 0, cy: 0, z0: zl, z1: zl + 0.045, r0: outer, r1: outer },
       })
+      ringsOn = { z0: p, z1: zl, r0: W * 0.5, r1: W * 0.36, shape: A }
+      if (!open) {
+        top = { shape: A, r: outer * 0.8, z: zl + 0.045 }
+        break
+      }
       // A beam of light between the pedestal and the floating crown
       const base = zl + 0.07
       parts.push({ b: column(0.02, zl - 0.01, base + 0.01), d: (x, y, z) => extrude(length2(x, y) - 0.01, z, zl - 0.01, base + 0.01), m: Mat.Glow })
       crownAt = { base, rim: outer, shape: A, scale: 1 }
-      ringsOn = { z0: p, z1: zl, r0: W * 0.5, r1: W * 0.36, shape: A }
       break
     }
   }
@@ -227,6 +239,123 @@ export function buildScene(def: TowerDef): Scene {
         b: column(r + 0.01, bz - 0.012, bz + 0.012, 0, 0, shape),
         d: (x, y, z) => extrude(sdShape2(shape, x, y, r), z, bz - 0.008, bz + 0.008),
         m: Mat.Glow,
+      })
+    }
+  }
+
+  /** The body's radius at height z (on the wall the rings go round) */
+  const bodyAt = (z: number) => {
+    const { z0, z1, r0, r1 } = ringsOn!
+    return r0 + (r1 - r0) * Math.min(1, Math.max(0, (z - z0) / (z1 - z0)))
+  }
+
+  // A gallery round the body just under the windows: a corbel, a plank floor and an iron railing
+  if (extras.balcony && ringsOn && form !== 'shrine') {
+    const { z0, z1, shape } = ringsOn
+    const zb = z0 + (z1 - z0) * 0.47
+    const r = bodyAt(zb)
+    const rOut = r + 0.042
+    const floorTop = zb + 0.014
+    parts.push({
+      b: column(rOut, zb - 0.036, zb, 0, 0, shape),
+      d: (x, y, z) => sdTaper(shape, x, y, z, zb - 0.035, zb, bodyAt(zb - 0.035), rOut * 0.97),
+      m: Mat.Stone,
+      w: { shape, cx: 0, cy: 0, z0: zb - 0.035, z1: zb, r0: bodyAt(zb - 0.035), r1: rOut * 0.97 },
+    })
+    parts.push({
+      b: column(rOut, zb - 0.001, floorTop, 0, 0, shape),
+      d: (x, y, z) => extrude(sdShape2(shape, x, y, rOut), z, zb - 0.001, floorTop),
+      m: Mat.Wood,
+      w: { shape, cx: 0, cy: 0, z0: zb, z1: floorTop, r0: rOut, r1: rOut },
+    })
+    const railR = rOut - 0.004
+    const railTop = floorTop + 0.034
+    const sides = shapeSides(shape)
+    const period = 0.024
+    parts.push({
+      b: column(rOut, floorTop - 0.002, railTop, 0, 0, shape),
+      d: (x, y, z) => {
+        const outer = sdShape2(shape, x, y, railR)
+        const shell = Math.max(extrude(outer, z, floorTop - 0.002, railTop), -(outer + 0.005))
+        // Balusters between a bottom rail and a top rail
+        const s = sides === 0 ? Math.atan2(y, x) * railR : aroundShape(shape, x, y, railR).s
+        const m = s - period * (Math.floor(s / period) + 0.5)
+        const gap = Math.max(0.0032 - Math.abs(m), floorTop + 0.006 - z, z - (railTop - 0.007))
+        return Math.max(shell, -gap)
+      },
+      m: Mat.Trim,
+    })
+  }
+
+  // Long banners on the two walls facing the viewer, each with a glowing rune, hung from an iron rod
+  if (extras.banners && ringsOn && form !== 'shrine') {
+    const { z0, z1, shape } = ringsOn
+    const h = z1 - z0
+    const top = z0 + h * 0.9
+    const bottom = top - Math.max(0.1, h * 0.46)
+    const rFlat = bodyAt(bottom)
+    // Where the front walls face: [direction of the wall, offset along it]
+    const spots: [number, number][] =
+      shape === 'square' || shape === 'octagon' ? [[0, 0], [Math.PI / 2, 0]]
+        : shape === 'diamond' ? [[Math.PI / 4, -0.48 * rFlat], [Math.PI / 4, 0.48 * rFlat]]
+          : shape === 'hexagon' ? [[-Math.PI / 12, 0], [(7 * Math.PI) / 12, 0]]
+            : [[Math.PI / 4 - 0.62, 0], [Math.PI / 4 + 0.62, 0]]
+    const halfWidth = Math.min(0.032, rFlat * 0.36)
+    spots.forEach(([a, off], k) => {
+      const nx = Math.cos(a)
+      const ny = Math.sin(a)
+      // Out from the wall where it is widest (at the banner's foot), clear of a round wall's curve
+      const d = rFlat + 0.005 + (shape === 'round' ? (halfWidth * halfWidth) / (2 * rFlat) : 0)
+      const cxp = nx * d - ny * off
+      const cyp = ny * d + nx * off
+      const reach = halfWidth + 0.02
+      parts.push({
+        b: [cxp - reach, cyp - reach, bottom - 0.01, cxp + reach, cyp + reach, top + 0.01],
+        d: (x, y, z) => {
+          const n = x * nx + y * ny - d
+          const t = -x * ny + y * nx - off
+          // A swallowtail cut into its foot, and a gentle sway
+          const sway = Math.sin(t * 90 + k) * 0.0012
+          const box = sdBox(n - sway, t, z - (top + bottom) / 2, 0.0022, halfWidth, (top - bottom) / 2)
+          return Math.max(box, bottom + 0.032 * (1 - Math.abs(t) / halfWidth) - z) * 0.8
+        },
+        m: Mat.Cloth,
+        cloth: { nx, ny, d, off, halfWidth, top, bottom, id: def.seed * 3 + k },
+      })
+      // The rod it hangs from, reaching back into the wall
+      const ax = nx * (d + 0.003) - ny * (off - halfWidth - 0.008)
+      const ay = ny * (d + 0.003) + nx * (off - halfWidth - 0.008)
+      const bx = nx * (d + 0.003) - ny * (off + halfWidth + 0.008)
+      const by = ny * (d + 0.003) + nx * (off + halfWidth + 0.008)
+      parts.push({
+        b: [Math.min(ax, bx) - 0.01, Math.min(ay, by) - 0.01, top - 0.01, Math.max(ax, bx) + 0.01, Math.max(ay, by) + 0.01, top + 0.015],
+        d: (x, y, z) => sdCapsule(x, y, z, ax, ay, top + 0.004, bx, by, top + 0.004, 0.0042),
+        m: Mat.Trim,
+      })
+    })
+  }
+
+  // Iron spikes round the plinth's edge, pointing out and up
+  if (extras.spikes) {
+    const count = level === 1 ? 6 : level === 2 ? 8 : 10
+    const len = 0.095 * c
+    for (let i = 0; i < count; i++) {
+      const a = Math.PI / 4 + Math.PI / count + (i * 2 * Math.PI) / count
+      const R = shapeRadius(A, a, plinthTop) * 0.93
+      const px = Math.cos(a) * R
+      const py = Math.sin(a) * R
+      const ux = Math.cos(a)
+      const uy = Math.sin(a)
+      const lean = 0.38
+      parts.push({
+        b: column(len + 0.02, p - 0.02, p + len + 0.01, px, py),
+        d: (x, y, z) => {
+          const out = (x - px) * ux + (y - py) * uy
+          const across = -(x - px) * uy + (y - py) * ux
+          const [ro, rz] = rotX(out, z - p + 0.008, lean)
+          return sdTaper('round', across, ro, rz, 0, len, 0.02, 0.002) * 0.7
+        },
+        m: Mat.Trim,
       })
     }
   }
@@ -278,6 +407,8 @@ export function buildScene(def: TowerDef): Scene {
     magic,
     runes: extras.runes,
     cracks: extras.cracks,
+    masonry: def.masonry ?? 'bricks',
+    vines: !!extras.vines,
     circle: extras.circle ? Math.min(0.47, plinthOuter + 0.09) : null,
     colors: {
       stoneDark: hexToRgb(colors.stone[0]),
@@ -432,6 +563,138 @@ function finishTop(parts: Part[], top: TowerTop, shape: TowerShape, r1: number, 
       const apex = zf + rim * 1.9
       parts.push({ b: column(r0, zf, apex, 0, 0, shape), d: (x, y, z) => sdTaper(shape, x, y, z, zf, apex, r0, 0.004), m: Mat.Roof, w: wallOf(shape, r0, 0.004, zf, apex) })
       return { base: apex - 0.012, rim: r0 * 0.4, shape, scale: 0.6 }
+    }
+    case 'turrets': {
+      // Battlements with a round turret and its pointed roof standing out of each corner
+      const rim = r1 * 1.32
+      const zf = corbel(rim)
+      const zh = zf + 0.075
+      parts.push({ b: column(rim, zf - 0.005, zh, 0, 0, shape), d: battlements(shape, rim, zf - 0.005, zh, level), m: Mat.Stone, w: wallOf(shape, rim, rim, zf, zh) })
+      const tr = 0.034 + 0.006 * level
+      for (let i = 0; i < 4; i++) {
+        const a = (i * Math.PI) / 2 + (shape === 'diamond' ? 0 : Math.PI / 4)
+        const reach = shapeRadius(shape, a, rim) * 0.97
+        const cx = Math.cos(a) * reach
+        const cy = Math.sin(a) * reach
+        const z0 = zf - 0.09
+        const z1 = zh + 0.035
+        parts.push({ b: column(tr, z0, z1, cx, cy), d: (x, y, z) => sdTaper('round', x - cx, y - cy, z, z0, z1, tr * 0.85, tr), m: Mat.Stone, w: { shape: 'round', cx, cy, z0, z1, r0: tr * 0.85, r1: tr } })
+        // A little corbel under it, and its roof
+        parts.push({ b: column(tr, z0 - 0.04, z0 + 0.002, cx, cy), d: (x, y, z) => sdTaper('round', x - cx, y - cy, z, z0 - 0.04, z0 + 0.001, 0.004, tr * 0.85), m: Mat.Stone, w: { shape: 'round', cx, cy, z0: z0 - 0.04, z1: z0, r0: 0.004, r1: tr * 0.85 } })
+        parts.push({ b: column(tr * 1.3, z1, z1 + tr * 2.6, cx, cy), d: (x, y, z) => sdTaper('round', x - cx, y - cy, z, z1, z1 + tr * 2.6, tr * 1.28, 0.002), m: Mat.Roof, w: { shape: 'round', cx, cy, z0: z1, z1: z1 + tr * 2.6, r0: tr * 1.28, r1: 0.002 } })
+      }
+      if (flags) addFlags(rim * 0.8, zh - 0.02)
+      return { base: zf, rim, shape, scale: 1 }
+    }
+    case 'pagoda': {
+      // Stacked roofs with upturned eaves, each smaller, a short wall between them; the crown on the last one
+      const rim = r1 * 1.15
+      let z = corbel(rim)
+      let r = rim * 1.3
+      const tiers = level === 1 ? 2 : 3
+      for (let k = 0; k < tiers; k++) {
+        const z0 = z
+        const h = 0.05 + 0.01 * (tiers - k)
+        const top = r * 0.42
+        const lift = 0.034 + 0.006 * level
+        const eave = r
+        parts.push({
+          b: column(eave, z0 - 0.01, z0 + h + lift, 0, 0, shape),
+          d: (x, y, zz) => {
+            // How far out a point is, 0 at the axis, 1 on the eave
+            const out = Math.max(0, (sdShape2(shape, x, y, 1) + 1) / eave)
+            const up = lift * Math.max(0, Math.min(1, (out - 0.6) / 0.4)) ** 2
+            return sdTaper(shape, x, y, zz - up, z0, z0 + h, eave, top) * 0.7
+          },
+          m: Mat.Roof,
+          w: wallOf(shape, eave, top, z0, z0 + h),
+        })
+        z = z0 + h
+        if (k < tiers - 1) {
+          const wr = top * 1.05
+          slab(shape, wr, z - 0.005, z + 0.05, Mat.Stone)
+          z += 0.05
+          r *= 0.72
+        }
+      }
+      // A cap and a gold ring under the crown
+      slab(shape, r * 0.45, z - 0.004, z + 0.012, Mat.Trim)
+      return { base: z + 0.012, rim: r * 0.45, shape, scale: 0.75 }
+    }
+    case 'thorns': {
+      // A floor ringed by big rough horns of rock curving up and out: a wild, cruel top
+      const rim = r1 * 1.3
+      const zf = corbel(rim)
+      slab(shape, rim, zf, zf + 0.02, Mat.Stone)
+      const count = level === 1 ? 5 : level === 2 ? 6 : 8
+      for (let i = 0; i < count; i++) {
+        const a = (i * 2 * Math.PI) / count + 0.3
+        const reach = shapeRadius(shape, a, rim) * 0.86
+        const cx = Math.cos(a) * reach
+        const cy = Math.sin(a) * reach
+        const ux = Math.cos(a)
+        const uy = Math.sin(a)
+        const len = (0.13 + random() * 0.06) * (0.85 + level * 0.1)
+        const lean = 0.25 + random() * 0.25
+        const z0 = zf + 0.01
+        parts.push({
+          b: column(0.03 + len * 0.6, z0 - 0.02, z0 + len, cx + ux * len * 0.3, cy + uy * len * 0.3),
+          d: (x, y, z) => {
+            // Leaning further out the higher it goes (a curve), rough
+            const t = Math.max(0, z - z0)
+            const bend = lean * t + 1.4 * t * t
+            const out = (x - cx) * ux + (y - cy) * uy - bend
+            const across = -(x - cx) * uy + (y - cy) * ux
+            const rough = (noise3(x * 40, y * 40, z * 40, 17 + i) - 0.5) * 0.008
+            return (sdTaper('round', across, out, z, z0, z0 + len, 0.026, 0.002) + rough) * 0.55
+          },
+          m: Mat.Rock,
+        })
+      }
+      return { base: zf + 0.02, rim, shape, scale: 1 }
+    }
+    case 'stepped': {
+      // A stepped pyramid: each step narrower, a gold band on the last, the crown on its flat top
+      const rim = r1 * 1.3
+      let z = corbel(rim)
+      let r = rim
+      const steps = level + 1
+      for (let k = 0; k < steps; k++) {
+        r *= k === 0 ? 0.9 : 0.74
+        const h = 0.046
+        slab(shape, r, z - 0.003, z + h, Mat.Stone)
+        z += h
+      }
+      slab(shape, r * 0.82, z - 0.003, z + 0.016, Mat.Trim)
+      z += 0.016
+      return { base: z, rim: r * 0.82, shape, scale: 0.9 }
+    }
+    case 'halo': {
+      // A floor, and a ring of stone floating round the crown, a few loose stones and glowing bands holding it up
+      const rim = r1 * 1.25
+      const zf = corbel(rim)
+      slab(shape, rim, zf, zf + 0.025, Mat.Stone)
+      const base = zf + 0.025
+      const R = rim * 0.95
+      const za = base + 0.1
+      const zb = za + 0.042
+      parts.push({
+        b: column(R, za, zb, 0, 0, shape),
+        d: (x, y, z) => Math.max(extrude(sdShape2(shape, x, y, R), z, za, zb), -sdShape2(shape, x, y, R - 0.045)),
+        m: Mat.Plinth,
+        w: wallOf(shape, R, R, za, zb),
+      })
+      parts.push({ b: column(R + 0.01, zb - 0.01, zb + 0.01, 0, 0, shape), d: (x, y, z) => extrude(Math.abs(sdShape2(shape, x, y, R - 0.0225)) - 0.005, z, zb - 0.001, zb + 0.004), m: Mat.Glow })
+      for (let i = 0; i < 3; i++) {
+        const a = Math.PI / 4 + ((i - 1) * 2 * Math.PI) / 3
+        const sr = R * 0.92
+        const cx = Math.cos(a) * sr
+        const cy = Math.sin(a) * sr
+        const cz = base + 0.05 + random() * 0.025
+        const s = 0.028 + random() * 0.012
+        parts.push({ b: column(s * 1.4, cz - s * 1.4, cz + s * 1.4, cx, cy), d: (x, y, z) => (sdSphere(x - cx, y - cy, (z - cz) * 1.3, s) + (noise3(x * 60, y * 60, z * 60, 23 + i) - 0.5) * 0.01) * 0.7, m: Mat.Rock })
+      }
+      return { base, rim: R, shape, scale: 1 }
     }
     default: {
       const rim = r1 * 1.32

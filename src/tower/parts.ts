@@ -21,6 +21,21 @@ export const enum Mat {
   Gem,
   /** Glowing glass: see-through, the crown shows inside it */
   Glass,
+  /** Cloth of the accent colour: banners (with a rune, given their `cloth`) */
+  Cloth,
+}
+
+/** Where a hanging banner is: its plane (normal nx, ny at distance d from the axis), its middle along it, its size */
+export interface Cloth {
+  nx: number
+  ny: number
+  d: number
+  off: number
+  halfWidth: number
+  top: number
+  bottom: number
+  /** Which rune it carries */
+  id: number
 }
 
 /**
@@ -45,6 +60,7 @@ export interface Part {
   d: (x: number, y: number, z: number) => number
   m: Mat
   w?: Wall
+  cloth?: Cloth
 }
 
 export interface Light {

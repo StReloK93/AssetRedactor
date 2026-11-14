@@ -3,7 +3,12 @@ import { useSpriteSet } from '../core/useSpriteSet'
 import {
   CLANS,
   Clan,
+  EXTRA_IDS,
+  FORMS,
+  MASONRIES,
   OTHER_CLAN,
+  SHAPES,
+  TOPS,
   PALETTES,
   TOWERS_PER_CLAN,
   TowerDef,
@@ -35,6 +40,11 @@ const STARTERS = new Map(CLANS.flatMap(clanStarters).map(t => [t.name, t]))
 function revive(t: Partial<TowerDef> & { name: string }): TowerDef {
   const base = newTower({ name: t.name, level: t.level })
   const tower: TowerDef = { ...base, ...t, clan: t.clan ?? clanOfName(t.name), extras: { ...base.extras, ...t.extras }, colors: { ...base.colors, ...t.colors } }
+  // The eye is no longer made: the rings of light take its place
+  if ((tower.crown as string) === 'eye') tower.crown = 'armillary'
+  // The diamond is no longer offered: a square instead
+  if (tower.shape === 'diamond') tower.shape = 'square'
+  if (tower.upperShape === 'diamond') tower.upperShape = 'square'
   if (!RETIRED_FORMS.includes(tower.form as string)) return tower
   const starter = STARTERS.get(tower.name)
   return starter ? { ...structuredClone(starter), id: tower.id, clan: tower.clan } : { ...tower, form: 'keep' }
@@ -84,12 +94,44 @@ export function useTowerStudio() {
   const selected = computed<TowerDef | undefined>(() => project.towers.find(t => t.id === selectedId.value))
 
   const worker = new Worker(new URL('./towerWorker.ts', import.meta.url), { type: 'module' })
-  const { sprites, building, pending, exportState, exportToGame, refocus } = useSpriteSet<TowerProject, TowerMeta>(
+  const { sprites, building, pending, exportState, exportToGame, refocus, saveState } = useSpriteSet<TowerProject, TowerMeta>(
     worker,
     project,
     STORAGE_KEY,
     () => (selected.value ? towerFileName(selected.value.name) : undefined),
+    saved => replaceProject(saved),
   )
+
+  /** Puts a saved set in place of the current one; false if it holds no towers */
+  function replaceProject(saved: Partial<TowerProject>): boolean {
+    if (!Array.isArray(saved.towers) || !saved.towers.length) return false
+    const defaults = defaultProject()
+    const towers = saved.towers.filter(t => t && typeof t.name === 'string').map(t => revive({ ...t, id: t.id || newId() }))
+    if (!towers.length) return false
+    Object.assign(project, { ...defaults, ...saved, shadow: saved.shadow ?? true, towers })
+    selectedId.value = towers[0].id
+    return true
+  }
+
+  /** The whole set as a JSON file to keep (Downloads) */
+  function downloadProject(): void {
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    link.href = url
+    link.download = `isoforge-towers-${stamp}.json`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+  /** A set from a JSON file (one saved with downloadProject, or saves/isoforge.tower.v4.json) */
+  async function openProject(file: File): Promise<boolean> {
+    try {
+      return replaceProject(JSON.parse(await file.text()) as Partial<TowerProject>)
+    } catch {
+      return false
+    }
+  }
   const spriteOf = (id: string) => sprites.value.find(s => s.meta.id === id)
   // Picking another tower: the worker makes its sharper preview
   watch(selectedId, () => refocus())
@@ -199,8 +241,34 @@ export function useTowerStudio() {
     if (starters[0]) selectedId.value = starters[0].id
   }
 
+  /**
+   * A new look for the selected tower, drawn at random: build, shapes, top, walls, decorations and proportions.
+   * Its clan's crown, colours, size and name stay, so it still belongs to its clan.
+   */
+  function randomize(): void {
+    const t = selected.value
+    if (!t) return
+    const pick = <T,>(list: readonly T[]): T => list[Math.floor(Math.random() * list.length)]
+    const between = (min: number, max: number, step: number) => Math.round((min + Math.random() * (max - min)) / step) * step
+    t.form = pick(FORMS)
+    t.shape = pick(SHAPES)
+    t.upperShape = Math.random() < 0.4 ? t.shape : pick(SHAPES)
+    t.top = t.level === 1 && Math.random() < 0.4 ? 'floor' : pick(TOPS)
+    t.masonry = pick(MASONRIES)
+    for (const id of EXTRA_IDS) t.extras[id] = Math.random() < (id === 'windows' || id === 'runes' ? 0.6 : 0.3)
+    t.width = +between(0.85, 1.15, 0.05).toFixed(2)
+    t.height = +between(0.85, 1.25, 0.05).toFixed(2)
+    t.taper = +between(0.04, 0.26, 0.02).toFixed(2)
+    t.weathering = +between(0, 0.7, 0.05).toFixed(2)
+    t.seed = Math.floor(Math.random() * 999) + 1
+  }
+
   return {
     project,
+    saveState,
+    downloadProject,
+    openProject,
+    randomize,
     clans,
     open,
     toggleClan,

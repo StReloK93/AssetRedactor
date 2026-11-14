@@ -2,7 +2,8 @@ import { hexToRgb, rgbToCss } from '../core/color'
 import { ANCHOR_Y, SPRITE_H, SPRITE_W } from '../core/format'
 import type { SpriteTask } from '../core/spriteWorker'
 import { TowerProject, towerFileName } from './model'
-import { project, renderTower } from './render'
+import { project, renderTower, type RenderOptions } from './render'
+import type { PictureKind, RenderPool } from './renderPool'
 import { buildScene } from './scene'
 
 /** Which tower a sprite is, and where on it the crown is (the game launches projectiles from about there) */
@@ -21,14 +22,18 @@ export interface TowerMeta {
 const GAME_SCALE = 0.5
 const DEFAULT_MUZZLE_Y = SPRITE_H * ANCHOR_Y - (64 * 1.35) / GAME_SCALE
 
-export function towerTasks(set: TowerProject): SpriteTask<TowerMeta>[] {
+/** The tower set's sprites; with a pool, every picture is drawn on all cores */
+export function towerTasks(set: TowerProject, pool?: RenderPool): SpriteTask<TowerMeta>[] {
   const shared = { brickSize: set.brickSize, outline: set.outline, shadow: set.shadow }
   return set.towers.map(def => {
     const { id: _id, name: _name, ...look } = def
+    const key = JSON.stringify({ look, shared })
     const scene = buildScene(def)
     const crown = project(scene.light.x, scene.light.y, scene.light.z)
-    const draw = (quality: 'draft' | 'final', scale = 1) => () => {
-      const pixels = renderTower(scene, { seed: def.seed, weathering: def.weathering, glow: def.glow, ...shared, quality, scale })
+    const draw = (kind: PictureKind) => async () => {
+      const scale = kind === 'hd' ? 2 : 1
+      const options: RenderOptions = { seed: def.seed, weathering: def.weathering, glow: def.glow, ...shared, quality: kind === 'draft' ? 'draft' : 'final', scale }
+      const pixels = pool ? await pool.render(key, kind, def, scene, options) : renderTower(scene, options)
       const canvas = new OffscreenCanvas(SPRITE_W * scale, SPRITE_H * scale)
       const ctx = canvas.getContext('2d')!
       ctx.putImageData(new ImageData(pixels, SPRITE_W * scale, SPRITE_H * scale), 0, 0)
@@ -38,12 +43,12 @@ export function towerTasks(set: TowerProject): SpriteTask<TowerMeta>[] {
     }
     return {
       name: towerFileName(def.name),
-      key: JSON.stringify({ look, shared }),
+      key,
       meta: { id: def.id, crown, muzzleOffsetY: Math.round((crown.y - DEFAULT_MUZZLE_Y) * GAME_SCALE) },
       build: draw('final'),
       draft: draw('draft'),
       // Twice as sharp, for the preview only (the export stays 256 x 512)
-      hd: draw('final', 2),
+      hd: draw('hd'),
     }
   })
 }

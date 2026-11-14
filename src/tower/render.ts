@@ -75,9 +75,14 @@ export interface RenderOptions {
   shadow: boolean
   /** Pixels per sprite pixel: 2 draws a sharper, double-size picture (for the preview) */
   scale?: number
+  /**
+   * Only these output rows [from, to) (the rest of the picture is left out): lets several workers each draw a band of
+   * one picture. The result is then (to - from) rows high, and exactly what a whole picture has there.
+   */
+  rows?: [number, number]
 }
 
-/** A rendered sprite: straight (not premultiplied) RGBA pixels, 256 x 512 times the scale */
+/** A rendered sprite: straight (not premultiplied) RGBA pixels, 256 x 512 times the scale (or only the rows asked for) */
 export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedArray {
   const { parts, bounds } = scene
   const n = parts.length
@@ -199,6 +204,134 @@ export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedA
     const amount = clamp((patch - 0.62 + w * 0.5 - z * 1.3 + Math.max(nz, 0) * 0.25) * 5, 0, 1) * Math.min(1, w * 1.6)
     c = mix(c, shade(moss, 0.8 + tone * 0.4), amount * 0.85)
     return shade(c, 1 - 0.3 * w * smoothstep(0.14, 0, z))
+  }
+
+  /** Where on a wall a point is: along it (s), up it (t), which side; on a top face, across it */
+  function wallCoords(x: number, y: number, z: number, nz: number, wall: Wall): { s: number; t: number; side: number } {
+    if (nz > 0.7) return { s: x + y * 0.31, t: y, side: 9 }
+    const around = aroundShape(wall.shape, x - wall.cx, y - wall.cy, radiusAt(wall, z))
+    return { s: around.s, t: z, side: around.side }
+  }
+
+  /** The body's walls, by what they are made of (the plinth always keeps its bricks) */
+  function wallColor(x: number, y: number, z: number, nz: number, wall: Wall): Rgb {
+    switch (scene.masonry) {
+      case 'blocks':
+        return blockColor(x, y, z, nz, wall)
+      case 'rubble':
+        return rubbleColor(x, y, z, nz, wall)
+      case 'plaster':
+        return plasterColor(x, y, z, nz, wall)
+      case 'planks':
+        return plankWallColor(x, y, z, nz, wall)
+      default:
+        return stoneColor(x, y, z, nz, false, wall)
+    }
+  }
+
+  /** Big cut blocks: few joints, each block its own shade, chiselled edges */
+  function blockColor(x: number, y: number, z: number, nz: number, wall: Wall): Rgb {
+    const size = options.brickSize
+    const { s, t, side } = wallCoords(x, y, z, nz, wall)
+    const b = nz > 0.7 ? bricks(s, t, 0.13 * size, 0.1 * size) : bricks(s, t, 0.15 * size, 0.066 * size)
+    const m = 0.0035
+    if (b.edge < m) return shade(mortar, 0.85 + noise3(x * 90, y * 90, z * 90, seed) * 0.2)
+    const tone = hash3(b.col, b.row, side, seed + 17)
+    const grain = noise3(x * 55, y * 55, z * 55, seed + 3) - 0.5
+    const pits = smoothstep(0.7, 0.8, noise3(x * 160, y * 160, z * 160, seed + 4)) * 0.18
+    let c = mix(colors.stoneDark, colors.stoneLight, clamp(0.18 + tone * 0.72 + grain * 0.2, 0, 1))
+    c = shade(c, (0.72 + 0.28 * smoothstep(m, m + 0.012, b.edge)) * (nz <= 0.7 && b.ft > 0.86 ? 1.08 : 1) * (1 - pits))
+    return weather(c, x, y, z, nz, tone)
+  }
+
+  /** Rough stones of every size set in mortar (a Voronoi pattern on the wall) */
+  function rubbleColor(x: number, y: number, z: number, nz: number, wall: Wall): Rgb {
+    const size = 0.05 * options.brickSize
+    const { s, t, side } = wallCoords(x, y, z, nz, wall)
+    const u = s / size
+    const v = t / (size * 0.72)
+    const iu = Math.floor(u)
+    const iv = Math.floor(v)
+    let d1 = Infinity
+    let d2 = Infinity
+    let id = 0
+    for (let dv = -1; dv <= 1; dv++) {
+      for (let du = -1; du <= 1; du++) {
+        const cu = iu + du
+        const cv = iv + dv
+        const fu = cu + 0.1 + 0.8 * hash3(cu, cv, side, seed + 71) - u
+        const fv = cv + 0.1 + 0.8 * hash3(cu, cv, side, seed + 72) - v
+        const d = fu * fu + fv * fv
+        if (d < d1) {
+          d2 = d1
+          d1 = d
+          id = cu * 131 + cv
+        } else if (d < d2) d2 = d
+      }
+    }
+    const edge = (Math.sqrt(d2) - Math.sqrt(d1)) * size * 0.5
+    const m = 0.003
+    if (edge < m) return shade(mortar, 0.95 + noise3(x * 90, y * 90, z * 90, seed) * 0.2)
+    const tone = hash3(id, 5, side, seed + 73)
+    const grain = noise3(x * 80, y * 80, z * 80, seed + 74) - 0.5
+    let c = mix(colors.stoneDark, colors.stoneLight, clamp(0.12 + tone * 0.78 + grain * 0.3, 0, 1))
+    // Each stone bulges: dark at its rim, lighter in the middle
+    c = shade(c, 0.68 + 0.32 * smoothstep(m, m + 0.016, edge))
+    return weather(c, x, y, z, nz, tone)
+  }
+
+  /** Smooth plaster, stained, the bricks showing where it has fallen off */
+  function plasterColor(x: number, y: number, z: number, nz: number, wall: Wall): Rgb {
+    const fallen = noise3(x * 9, y * 9, z * 9, seed + 61) * 0.75 + noise3(x * 30, y * 30, z * 30, seed + 62) * 0.25
+    const limit = 0.66 - options.weathering * 0.1
+    if (fallen > limit + 0.012) return shade(stoneColor(x, y, z, nz, false, wall), 0.82)
+    const lime = mix(colors.stoneLight, [236, 226, 204], 0.45)
+    const stain = noise3(x * 6, y * 6, z * 6, seed + 63) * 0.6 + noise3(x * 40, y * 40, z * 40, seed + 64) * 0.4
+    let c = shade(lime, 0.86 + stain * 0.16 - smoothstep(0.22, 0, z) * 0.12)
+    // Streaks running down from the top, and the broken edge round a fallen patch
+    c = shade(c, 1 - smoothstep(0.55, 0.75, noise3(x * 50, y * 50, z * 4, seed + 65)) * 0.08)
+    if (fallen > limit) c = shade(c, 0.62)
+    return weather(c, x, y, z, nz, stain)
+  }
+
+  /** Upright boards, tinted by the stone colours, held by iron bands */
+  function plankWallColor(x: number, y: number, z: number, nz: number, wall: Wall): Rgb {
+    const { s, t } = wallCoords(x, y, z, nz, wall)
+    const width = 0.028 * options.brickSize
+    const along = s
+    const plank = Math.floor(along / width)
+    const f = along / width - plank
+    const tone = hash3(plank, 11, 2, seed)
+    const wood = mix([116, 80, 50], colors.stoneLight, 0.28)
+    const grain = noise3(along * 25, (nz > 0.7 ? t : z) * 160, plank, seed + 9)
+    let c = shade(mix(wood, colors.stoneDark, 0.25 + tone * 0.2), 0.72 + tone * 0.3 + (grain - 0.5) * 0.2)
+    if (f < 0.07 || f > 0.93) c = shade(c, 0.5)
+    // Iron bands round the walls, riveted
+    if (nz <= 0.7) {
+      const band = 0.12 * options.brickSize
+      const k = z / band - Math.floor(z / band)
+      if (k > 0.86) {
+        const rivet = Math.abs(f - 0.5) < 0.16 && Math.abs(k - 0.93) < 0.035
+        c = shade(colors.trim, rivet ? 1.25 : 0.75 + (k > 0.97 ? -0.2 : 0))
+      }
+    }
+    return weather(c, x, y, z, nz, tone)
+  }
+
+  /** Ivy climbing from the ground, thick low down, in patches higher up */
+  function vines(c: Rgb, x: number, y: number, z: number, nz: number): Rgb {
+    if (!scene.vines || nz > 0.75) return c
+    const reach = 0.08 + 0.42 * noise3(x * 5, y * 5, 1.7, seed + 51)
+    const fade = clamp(1 - z / reach, 0, 1)
+    if (fade <= 0) return c
+    const n = noise3(x * 30, y * 30, z * 30, seed + 52) * 0.65 + noise3(x * 85, y * 85, z * 85, seed + 53) * 0.35
+    const threshold = 0.66 - fade * 0.4
+    const cover = smoothstep(threshold, threshold + 0.05, n) * smoothstep(0, 0.15, fade)
+    // Under the leaves' edge the wall is in their shade
+    const under = smoothstep(threshold - 0.08, threshold, n) * smoothstep(0, 0.15, fade)
+    const leaf = noise3(x * 190, y * 190, z * 190, seed + 54)
+    const green = mix([34, 62, 28], [96, 142, 54], clamp(leaf * 1.2 - 0.1, 0, 1))
+    return mix(shade(c, 1 - under * 0.35), green, cover)
   }
 
   /** Rough rock: layered noise, no bricks */
@@ -343,12 +476,12 @@ export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedA
       case Mat.Stone: {
         const win = nz < 0.5 ? windowAt(wall, px, py, pz) : 0
         if (win === 2) return mix(colors.glow, glowHot, 0.3)
-        base = win === 1 ? shade(mortar, 0.6) : stoneColor(px, py, pz, nz, false, wall)
+        base = win === 1 ? shade(mortar, 0.6) : vines(wallColor(px, py, pz, nz, wall), px, py, pz, nz)
         if (nz < 0.5) emit = Math.max(runeAt(wall, px, py, pz) * Math.min(1, scene.magic * 1.5), crackAt(px, py, pz))
         break
       }
       case Mat.Plinth:
-        base = stoneColor(px, py, pz, nz, true, wall)
+        base = vines(stoneColor(px, py, pz, nz, true, wall), px, py, pz, nz)
         emit = crackAt(px, py, pz)
         break
       case Mat.Rock:
@@ -368,6 +501,22 @@ export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedA
         const grain = noise3(along * 20, (nz > 0.7 ? py : pz) * 150, plank, seed + 9)
         // Wood brown, tinted by the accent colour
         base = shade(mix(colors.accent, [118, 80, 48], 0.6), (0.75 + tone * 0.35 + (grain - 0.5) * 0.18) * (f < 0.08 || f > 0.92 ? 0.6 : 1))
+        break
+      }
+      case Mat.Cloth: {
+        // Cloth: soft folds, a border of the metal colour, a rune glowing in the middle
+        const cloth = parts[part].cloth
+        base = colors.accent
+        if (cloth) {
+          const t = -px * cloth.ny + py * cloth.nx - cloth.off
+          const u = t / cloth.halfWidth
+          base = shade(colors.accent, 0.82 + 0.18 * Math.cos(u * Math.PI * 1.5) + (noise3(px * 120, py * 120, pz * 30, seed + 81) - 0.5) * 0.08)
+          if (Math.abs(u) > 0.78 || pz > cloth.top - 0.012) base = shade(colors.trim, 0.9)
+          const w = cloth.halfWidth * 1.15
+          const h = Math.min((cloth.top - cloth.bottom) * 0.34, w * 1.6)
+          const mid = cloth.top - (cloth.top - cloth.bottom) * 0.42
+          emit = glyph((t + w / 2) / w, (pz - (mid - h / 2)) / h, cloth.id, w, h) * Math.max(0.35, Math.min(1, scene.magic * 1.5))
+        }
         break
       }
       default: {
@@ -562,7 +711,112 @@ export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedA
     }
   }
 
-  // The part of the sprite worth casting rays for: the scene's box on screen, and the tile under it (for the shadow)
+
+  // The part of the sprite worth casting rays for, in output pixels (the sprite's pixels times the scale)
+  const R = options.scale ?? 1
+  const W = SPRITE_W * R
+  const H = SPRITE_H * R
+  const [x0, x1, y0, y1] = spriteRegion(scene, withShadow)
+  const X0 = x0 * R
+  const X1 = x1 * R
+  const Y0 = y0 * R
+  const Y1 = y1 * R
+
+  // The rows asked for (all of them, or a band), and the rows rays are cast for: a few more round a band, since
+  // edges, sharpening and the outline look at their neighbours (the band then comes out exactly as in a whole picture)
+  const [A, B] = options.rows ?? [0, H]
+  const bandA = clamp(A, Y0, Y1)
+  const bandB = clamp(B, Y0, Y1)
+  const margin = options.rows ? Math.ceil(options.outline * R) + 3 : 0
+  let CA = Math.max(Y0, bandA - margin)
+  // A draft casts one ray per 2 x 2 block counted from the region's top: a band keeps to the same blocks
+  if (options.quality === 'draft') CA = Y0 + ((CA - Y0) & ~1)
+  const CB = Math.max(CA, Math.min(Y1, bandB + margin))
+  const rows = CB - CA
+  const at = (px: number, py: number) => (py - CA) * W + px
+
+  const tower = new Float32Array(W * rows * 4) // r, g, b, coverage
+  const ground = new Float32Array(W * rows) // shadow strength
+  const circle = new Float32Array(W * rows) // the circle of runes' light
+  const partAt = new Int16Array(W * rows).fill(-1)
+  const store = (i: number) => {
+    tower[i * 4] = rayR
+    tower[i * 4 + 1] = rayG
+    tower[i * 4 + 2] = rayB
+    tower[i * 4 + 3] = rayA
+    ground[i] = rayShadow
+    circle[i] = rayCircle
+    partAt[i] = rayPart
+  }
+
+  if (bandA < bandB) {
+    if (options.quality === 'draft') {
+      // One ray for every 2 x 2 pixels: a quarter of the work, a little soft
+      for (let py = CA; py < CB; py += 2) {
+        for (let px = X0; px < X1; px += 2) {
+          cast((px + 1) / R, (py + 1) / R, 2 / (S * R))
+          for (let dy = 0; dy < 2 && py + dy < CB; dy++) for (let dx = 0; dx < 2 && px + dx < X1; dx++) store(at(px + dx, py + dy))
+        }
+      }
+    } else {
+      // One ray through every pixel's centre...
+      for (let py = CA; py < CB; py++) for (let px = X0; px < X1; px++) {
+        cast((px + 0.5) / R, (py + 0.5) / R, 1 / (S * R))
+        store(at(px, py))
+      }
+      // ...then four more only where an edge runs through the pixel: a silhouette, or one part meeting another
+      const r0 = Math.max(Y0 + 1, CA + 1)
+      const r1 = Math.min(Y1 - 1, CB - 1)
+      const refine = new Uint8Array(W * rows)
+      for (let py = r0; py < r1; py++) {
+        for (let px = X0 + 1; px < X1 - 1; px++) {
+          const i = at(px, py)
+          const a = tower[i * 4 + 3]
+          const part = partAt[i]
+          if ((a > 0 && a < 1) || part !== partAt[i - 1] || part !== partAt[i + 1] || part !== partAt[i - W] || part !== partAt[i + W]) refine[i] = 1
+        }
+      }
+      for (let py = r0; py < r1; py++) {
+        for (let px = X0 + 1; px < X1 - 1; px++) {
+          const i = at(px, py)
+          if (!refine[i]) continue
+          const a0 = tower[i * 4 + 3]
+          let r = tower[i * 4] * a0
+          let g = tower[i * 4 + 1] * a0
+          let b = tower[i * 4 + 2] * a0
+          let cover = a0
+          let shadow = ground[i]
+          let glow = circle[i]
+          for (const [ox, oy] of SUBPIXELS) {
+            cast((px + 0.5 + ox) / R, (py + 0.5 + oy) / R, 0.5 / (S * R))
+            r += rayR * rayA
+            g += rayG * rayA
+            b += rayB * rayA
+            cover += rayA
+            shadow += rayShadow
+            glow += rayCircle
+          }
+          if (cover > 0) {
+            tower[i * 4] = r / cover
+            tower[i * 4 + 1] = g / cover
+            tower[i * 4 + 2] = b / cover
+          }
+          tower[i * 4 + 3] = cover / 5
+          ground[i] = shadow / 5
+          circle[i] = glow / 5
+        }
+      }
+    }
+  }
+
+  const out = new Uint8ClampedArray(W * (B - A) * 4)
+  compose({ tower, ground, circle, W, CA, CB, x0: X0, x1: X1, y0: bandA, y1: bandB, out, outTop: A }, glowHot, options.outline * R, shade(colors.stoneDark, 0.28))
+  return out
+}
+
+/** The part of a sprite (in sprite pixels: x0, x1, y0, y1) worth casting rays for: the scene's box on screen, and the tile under it for the shadow */
+export function spriteRegion(scene: Scene, shadow: boolean): [number, number, number, number] {
+  const bounds = scene.bounds
   let minX = SPRITE_W
   let maxX = 0
   let minY = SPRITE_H
@@ -580,118 +834,55 @@ export function renderTower(scene: Scene, options: RenderOptions): Uint8ClampedA
     maxX = Math.max(maxX, CX + scene.circle * S + 2)
     maxY = Math.max(maxY, CY + scene.circle * S * SIN + 2)
   }
-  const x0 = Math.max(0, Math.floor(minX) - 2)
-  const x1 = Math.min(SPRITE_W, Math.ceil(maxX) + 2)
-  const y0 = Math.max(0, Math.floor(minY) - 2)
-  const y1 = Math.min(SPRITE_H, Math.ceil(Math.max(maxY, withShadow ? CY + 64 : maxY)) + 2)
-
-  // From here on in output pixels: the sprite's pixels times the scale
-  const R = options.scale ?? 1
-  const W = SPRITE_W * R
-  const H = SPRITE_H * R
-  const X0 = x0 * R
-  const X1 = x1 * R
-  const Y0 = y0 * R
-  const Y1 = y1 * R
-  const tower = new Float32Array(W * H * 4) // r, g, b, coverage
-  const ground = new Float32Array(W * H) // shadow strength
-  const circle = new Float32Array(W * H) // the circle of runes' light
-  const partAt = new Int16Array(W * H).fill(-1)
-  const store = (i: number) => {
-    tower[i * 4] = rayR
-    tower[i * 4 + 1] = rayG
-    tower[i * 4 + 2] = rayB
-    tower[i * 4 + 3] = rayA
-    ground[i] = rayShadow
-    circle[i] = rayCircle
-    partAt[i] = rayPart
-  }
-
-  if (options.quality === 'draft') {
-    // One ray for every 2 x 2 pixels: a quarter of the work, a little soft
-    for (let py = Y0; py < Y1; py += 2) {
-      for (let px = X0; px < X1; px += 2) {
-        cast((px + 1) / R, (py + 1) / R, 2 / (S * R))
-        for (let dy = 0; dy < 2 && py + dy < Y1; dy++) for (let dx = 0; dx < 2 && px + dx < X1; dx++) store((py + dy) * W + px + dx)
-      }
-    }
-  } else {
-    // One ray through every pixel's centre...
-    for (let py = Y0; py < Y1; py++) for (let px = X0; px < X1; px++) {
-      cast((px + 0.5) / R, (py + 0.5) / R, 1 / (S * R))
-      store(py * W + px)
-    }
-    // ...then four more only where an edge runs through the pixel: a silhouette, or one part meeting another
-    const refine = new Uint8Array(W * H)
-    for (let py = Y0 + 1; py < Y1 - 1; py++) {
-      for (let px = X0 + 1; px < X1 - 1; px++) {
-        const i = py * W + px
-        const a = tower[i * 4 + 3]
-        const part = partAt[i]
-        if ((a > 0 && a < 1) || part !== partAt[i - 1] || part !== partAt[i + 1] || part !== partAt[i - W] || part !== partAt[i + W]) refine[i] = 1
-      }
-    }
-    for (let py = Y0 + 1; py < Y1 - 1; py++) {
-      for (let px = X0 + 1; px < X1 - 1; px++) {
-        const i = py * W + px
-        if (!refine[i]) continue
-        const a0 = tower[i * 4 + 3]
-        let r = tower[i * 4] * a0
-        let g = tower[i * 4 + 1] * a0
-        let b = tower[i * 4 + 2] * a0
-        let cover = a0
-        let shadow = ground[i]
-        let glow = circle[i]
-        for (const [ox, oy] of SUBPIXELS) {
-          cast((px + 0.5 + ox) / R, (py + 0.5 + oy) / R, 0.5 / (S * R))
-          r += rayR * rayA
-          g += rayG * rayA
-          b += rayB * rayA
-          cover += rayA
-          shadow += rayShadow
-          glow += rayCircle
-        }
-        if (cover > 0) {
-          tower[i * 4] = r / cover
-          tower[i * 4 + 1] = g / cover
-          tower[i * 4 + 2] = b / cover
-        }
-        tower[i * 4 + 3] = cover / 5
-        ground[i] = shadow / 5
-        circle[i] = glow / 5
-      }
-    }
-  }
-
-  return compose(tower, ground, circle, glowHot, W, H, X0, X1, Y0, Y1, options.outline * R, shade(colors.stoneDark, 0.28))
+  return [
+    Math.max(0, Math.floor(minX) - 2),
+    Math.min(SPRITE_W, Math.ceil(maxX) + 2),
+    Math.max(0, Math.floor(minY) - 2),
+    Math.min(SPRITE_H, Math.ceil(Math.max(maxY, shadow ? CY + 64 : maxY)) + 2),
+  ]
 }
 
 /** Where the extra rays go inside an edge pixel */
 const SUBPIXELS: [number, number][] = [[-0.25, -0.25], [0.25, -0.25], [-0.25, 0.25], [0.25, 0.25]]
 
+/** The cast rows (CA..CB of a W-wide picture) and the rows y0..y1 to put into `out` (whose first row is outTop) */
+interface Layers {
+  tower: Float32Array
+  ground: Float32Array
+  circle: Float32Array
+  W: number
+  CA: number
+  CB: number
+  x0: number
+  x1: number
+  y0: number
+  y1: number
+  out: Uint8ClampedArray
+  outTop: number
+}
+
 /**
  * Tower over its outline over the circle of runes over its shadow, into 8-bit RGBA. The tower's colours get a
  * little more contrast and colour, and a light sharpening, so it reads crisp at the game's small size.
  */
-function compose(tower: Float32Array, ground: Float32Array, circle: Float32Array, circleColor: Rgb, W: number, H: number, x0: number, x1: number, y0: number, y1: number, outline: number, line: Rgb): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(W * H * 4)
+function compose(layers: Layers, circleColor: Rgb, outline: number, line: Rgb): void {
+  const { tower, ground, circle, W, CA, CB, x0, x1, y0, y1, out, outTop } = layers
   const reach = Math.ceil(outline)
   const SHARPEN = 0.45
+  /** Coverage at a pixel; none outside the cast rows */
+  const cover = (x: number, y: number) => (x < 0 || x >= W || y < CA || y >= CB ? 0 : tower[((y - CA) * W + x) * 4 + 3])
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
-      const i = y * W + x
+      const i = (y - CA) * W + x
       const a = tower[i * 4 + 3]
       // The outline: how much tower is within `outline` px
       let o = 0
       if (outline > 0 && a < 1) {
         for (let dy = -reach; dy <= reach; dy++) {
           for (let dx = -reach; dx <= reach; dx++) {
-            const nx = x + dx
-            const ny = y + dy
-            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
             const dist = Math.hypot(dx, dy)
             if (dist > outline + 0.5) continue
-            o = Math.max(o, tower[(ny * W + nx) * 4 + 3] * clamp(outline + 0.5 - dist, 0, 1))
+            o = Math.max(o, cover(x + dx, y + dy) * clamp(outline + 0.5 - dist, 0, 1))
           }
         }
       }
@@ -699,21 +890,18 @@ function compose(tower: Float32Array, ground: Float32Array, circle: Float32Array
       let tr = tower[i * 4]
       let tg = tower[i * 4 + 1]
       let tb = tower[i * 4 + 2]
-      if (a >= 1 && x > 0 && y > 0 && x < W - 1 && y < H - 1) {
-        const n = [i - 1, i + 1, i - W, i + W]
-        if (n.every(j => tower[j * 4 + 3] >= 1)) {
-          let ar = 0
-          let ag = 0
-          let ab = 0
-          for (const j of n) {
-            ar += tower[j * 4]
-            ag += tower[j * 4 + 1]
-            ab += tower[j * 4 + 2]
-          }
-          tr += (tr - ar / 4) * SHARPEN
-          tg += (tg - ag / 4) * SHARPEN
-          tb += (tb - ab / 4) * SHARPEN
+      if (a >= 1 && cover(x - 1, y) >= 1 && cover(x + 1, y) >= 1 && cover(x, y - 1) >= 1 && cover(x, y + 1) >= 1) {
+        let ar = 0
+        let ag = 0
+        let ab = 0
+        for (const j of [i - 1, i + 1, i - W, i + W]) {
+          ar += tower[j * 4]
+          ag += tower[j * 4 + 1]
+          ab += tower[j * 4 + 2]
         }
+        tr += (tr - ar / 4) * SHARPEN
+        tg += (tg - ag / 4) * SHARPEN
+        tb += (tb - ab / 4) * SHARPEN
       }
       const lum = tr * 0.3 + tg * 0.59 + tb * 0.11
       tr = (lum + (tr - lum) * 1.12 - 128) * 1.07 + 128
@@ -736,11 +924,11 @@ function compose(tower: Float32Array, ground: Float32Array, circle: Float32Array
       if (circle[i] > 0) over(circleColor[0], circleColor[1], circleColor[2], circle[i] * 0.9)
       if (o > 0) over(line[0], line[1], line[2], o * 0.9)
       if (a > 0) over(tr, tg, tb, a)
-      out[i * 4] = r
-      out[i * 4 + 1] = g
-      out[i * 4 + 2] = b
-      out[i * 4 + 3] = alpha * 255
+      const k = ((y - outTop) * W + x) * 4
+      out[k] = r
+      out[k + 1] = g
+      out[k + 2] = b
+      out[k + 3] = alpha * 255
     }
   }
-  return out
 }

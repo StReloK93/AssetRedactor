@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import {
+  BrickWall,
   Castle,
   Check,
+  Download,
+  FolderInput,
+  Shuffle,
   ChevronRight,
   Flag,
   Folder,
@@ -43,6 +47,7 @@ import {
   towerFileName,
   type CrownId,
   type Level,
+  type Masonry,
   type TowerExtras,
   type TowerForm,
   type TowerShape,
@@ -51,6 +56,10 @@ import {
 
 const {
   project,
+  saveState,
+  downloadProject,
+  openProject,
+  randomize,
   clans,
   open,
   toggleClan,
@@ -103,6 +112,11 @@ const TOP_OPTIONS: { value: TowerTop; label: string; hint: string }[] = [
   { value: 'onion', label: 'Piyoz gumbaz', hint: 'Sharqona piyozsimon gumbaz' },
   { value: 'cupola', label: 'Ayvon', hint: 'Ustunlar ustida gumbaz, otish joyi ostida' },
   { value: 'roof', label: 'Uchli tom', hint: 'Shaklga mos uchli tom' },
+  { value: 'turrets', label: 'Burjli', hint: "Qal'a tishi, burchaklarida tomli kichik burjlar" },
+  { value: 'pagoda', label: 'Pagoda', hint: "Uchlari qayrilgan bir necha qavat tom" },
+  { value: 'thorns', label: 'Shoxli', hint: "Chetida tashqariga qayrilgan katta tosh shoxlar" },
+  { value: 'stepped', label: 'Zinapoya', hint: 'Pog\'onali piramida, otish joyi tepasida' },
+  { value: 'halo', label: 'Uchar halqa', hint: 'Otish joyi atrofida havoda turgan tosh halqa' },
 ]
 const CROWN_LABELS: Record<CrownId, string> = {
   brazier: 'Mangal',
@@ -113,7 +127,13 @@ const CROWN_LABELS: Record<CrownId, string> = {
   cauldron: 'Qozon',
   cannon: "To'p",
   finial: 'Nayza',
-  eye: "Ko'z",
+  armillary: 'Halqalar',
+  bell: "Qo'ng'iroq",
+  mortar: 'Mortira',
+  ballista: 'Arbalet',
+  lotus: 'Nilufar',
+  tiara: 'Toj',
+  horns: 'Shoxlar',
 }
 const EXTRA_LABELS: Record<keyof TowerExtras, string> = {
   windows: 'Derazalar',
@@ -124,7 +144,18 @@ const EXTRA_LABELS: Record<keyof TowerExtras, string> = {
   rings: "Nurli belbog'",
   buttresses: 'Tayanchlar',
   flags: 'Bayroqlar',
+  vines: 'Pechak',
+  banners: 'Osma bayroq',
+  balcony: 'Balkon',
+  spikes: 'Tikanlar',
 }
+const MASONRY_OPTIONS: { value: Masonry; label: string; hint: string }[] = [
+  { value: 'bricks', label: "G'isht", hint: "Oddiy g'isht terish" },
+  { value: 'blocks', label: 'Katta blok', hint: "Katta yo'nilgan tosh bloklar" },
+  { value: 'rubble', label: 'Xarsang', hint: "Har xil o'lchamdagi notekis toshlar" },
+  { value: 'plaster', label: 'Suvoq', hint: "Suvoqli devor, ba'zi joyida g'isht ko'rinadi" },
+  { value: 'planks', label: 'Yog\'och', hint: "Tik taxtalar, temir belbog'lar bilan" },
+]
 const LEVEL_OPTIONS: { value: Level; label: string }[] = [
   { value: 1, label: 'Kichik' },
   { value: 2, label: "O'rta" },
@@ -180,12 +211,31 @@ const paletteOn = (id: string) => {
 // A note after the export that goes away by itself
 const toast = ref<{ kind: 'done' | 'error'; text: string } | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | undefined
-watch(() => exportState.value.status, s => {
-  if (s !== 'done' && s !== 'error') return
-  toast.value = { kind: s, text: exportState.value.message }
+function showToast(kind: 'done' | 'error', text: string): void {
+  toast.value = { kind, text }
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (toast.value = null), s === 'done' ? 4000 : 8000)
+  toastTimer = setTimeout(() => (toast.value = null), kind === 'done' ? 4000 : 8000)
+}
+watch(() => exportState.value.status, s => {
+  if (s === 'done' || s === 'error') showToast(s, exportState.value.message)
 })
+
+/** Opening a saved set (it replaces the current one, which is first offered as a download) */
+const fileInput = ref<HTMLInputElement | null>(null)
+async function onOpenFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!confirm(`"${file.name}" ochilsinmi? Hozirgi minoralar uning o'rniga almashadi (oldin ularni faylga saqlab olish tavsiya etiladi).`)) return
+  if (await openProject(file)) showToast('done', `${file.name} ochildi: ${project.towers.length} minora`)
+  else showToast('error', `${file.name}: bu faylda minoralar topilmadi`)
+}
+const SAVE_LABELS = {
+  saved: { text: 'Saqlangan', hint: "Brauzerda va diskda (saves/ papka) saqlangan — sahifani yangilasangiz ham o'chmaydi" },
+  saving: { text: 'Saqlanmoqda…', hint: 'Oxirgi o\'zgarish saqlanmoqda' },
+  'browser-only': { text: 'Faqat brauzerda', hint: "Diskka yozib bo'lmadi (server ishlamayaptimi?). Brauzerda saqlangan; ehtiyot uchun JSON faylga ham saqlang" },
+} as const
 </script>
 
 <template>
@@ -266,6 +316,21 @@ watch(() => exportState.value.status, s => {
           <Upload v-else class="h-4 w-4" />
           {{ building ? 'Yasalmoqda…' : exportState.status === 'busy' ? 'Yozilmoqda…' : "O'yinga eksport" }}
         </button>
+        <div class="flex items-center gap-1.5">
+          <span
+            class="mr-auto flex items-center gap-1 text-[11px]"
+            :class="saveState === 'saved' ? 'text-emerald-400/80' : saveState === 'saving' ? 'text-slate-400' : 'text-amber-300'"
+            :title="SAVE_LABELS[saveState].hint"
+          >
+            <LoaderCircle v-if="saveState === 'saving'" class="h-3 w-3 animate-spin" />
+            <CircleCheck v-else-if="saveState === 'saved'" class="h-3 w-3" />
+            <CircleAlert v-else class="h-3 w-3" />
+            {{ SAVE_LABELS[saveState].text }}
+          </span>
+          <button class="btn-icon" title="Hamma minoralarni JSON faylga yuklab olish (zaxira)" @click="downloadProject"><Download class="h-4 w-4" /></button>
+          <button class="btn-icon" title="Saqlangan JSON fayldan ochish" @click="fileInput?.click()"><FolderInput class="h-4 w-4" /></button>
+          <input ref="fileInput" type="file" accept=".json,application/json" class="hidden" @change="onOpenFile" />
+        </div>
         <button class="btn h-8 text-xs text-slate-500 hover:bg-white/5 hover:text-slate-300" @click="confirmReset"><RotateCcw class="h-3.5 w-3.5" />Hammasini boshlang'ich holatga</button>
       </div>
     </aside>
@@ -336,6 +401,7 @@ watch(() => exportState.value.status, s => {
 
       <section class="flex flex-col gap-2.5">
         <h3 class="section-title"><Castle class="h-3.5 w-3.5" />Tuzilishi</h3>
+        <button class="btn-soft text-xs" title="Tuzilishi, shakli, tepasi, devori, bezaklari va o'lchamlari tasodifiy tanlanadi. Klan, ranglar, otish joyi va hajmi o'zgarmaydi." @click="randomize"><Shuffle class="h-3.5 w-3.5" />Tasodifiy ko'rinish</button>
         <ChipGroup v-model="selected.form" :options="BUILDING_FORMS" />
         <span class="mt-1 text-[11px] text-slate-500">Hajmi</span>
         <ChipGroup v-model="selected.level" :options="LEVEL_OPTIONS" />
@@ -350,9 +416,14 @@ watch(() => exportState.value.status, s => {
       </section>
 
       <section class="flex flex-col gap-2.5">
+        <h3 class="section-title"><BrickWall class="h-3.5 w-3.5" />Devori</h3>
+        <ChipGroup v-model="selected.masonry" :options="MASONRY_OPTIONS" />
+      </section>
+
+      <section class="flex flex-col gap-2.5">
         <h3 class="section-title"><Landmark class="h-3.5 w-3.5" />Tepasi</h3>
-        <ChipGroup v-model="selected.top" :options="TOP_OPTIONS" :disabled="selected.form === 'shrine'" />
-        <p v-if="selected.form === 'shrine'" class="text-[11px] text-slate-500">Ustunli minorada otish joyi ustunlar ustida turadi.</p>
+        <ChipGroup v-model="selected.top" :options="TOP_OPTIONS" />
+        <p v-if="selected.form === 'shrine'" class="text-[11px] text-slate-500">Ustunlida "Qal'a tishi" va "Supa" ochiq bo'ladi (otish joyi halqa ustida suzadi), qolganlari ustunlar ustiga tom bo'lib quriladi.</p>
       </section>
 
       <section class="flex flex-col gap-2.5">

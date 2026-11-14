@@ -12,11 +12,11 @@ export interface SpriteTask<M> {
   name: string
   key: string
   meta: M
-  build: () => OffscreenCanvas
+  build: () => OffscreenCanvas | Promise<OffscreenCanvas>
   /** A quicker, rougher picture shown until `build` is done */
-  draft?: () => OffscreenCanvas
+  draft?: () => OffscreenCanvas | Promise<OffscreenCanvas>
   /** A sharper, bigger picture for the preview only, made for the sprite in focus once it is final */
-  hd?: () => OffscreenCanvas
+  hd?: () => OffscreenCanvas | Promise<OffscreenCanvas>
 }
 
 /** final: done; draft: the quick picture so far; stale: still the picture of the settings before */
@@ -53,12 +53,17 @@ export type WorkerResponse<M> =
 /** How often a slow build shows what it has so far */
 const PROGRESS_MS = 250
 /**
- * How long the settings must stay still before the final pictures start. A final picture cannot be stopped
- * half way, so starting one while a slider is still moving would hold up the next draft.
+ * How long the settings must stay still before the final pictures start. A final picture drawn in place cannot be
+ * stopped half way, so starting one while a slider is still moving would hold up the next draft (a pool's can).
  */
-const SETTLE_MS = 400
+const SETTLE_MS = 150
 
-export function serveSprites<S, M>(tasksFor: (settings: S) => SpriteTask<M>[]): void {
+export interface ServeHooks<M> {
+  /** A new request's sprites, before any is built: work for older requests may be dropped here */
+  onRequest?: (tasks: SpriteTask<M>[], focus?: string) => void
+}
+
+export function serveSprites<S, M>(tasksFor: (settings: S) => SpriteTask<M>[], hooks: ServeHooks<M> = {}): void {
   const scope = self as unknown as DedicatedWorkerGlobalScope
   const cache = new Map<string, OffscreenCanvas>()
   const drafts = new Map<string, OffscreenCanvas>()
@@ -97,13 +102,20 @@ export function serveSprites<S, M>(tasksFor: (settings: S) => SpriteTask<M>[]): 
 
   async function build(id: number, settings: S, focus?: string): Promise<void> {
     const tasks = tasksFor(settings)
+    hooks.onRequest?.(tasks, focus)
     const focused = tasks.find(t => t.name === focus)
     const order = focused ? [focused, ...tasks.filter(t => t !== focused)] : tasks
     let lastPost = 0
 
-    /** Builds one picture; false if a newer request came in meanwhile */
-    const step = async (task: SpriteTask<M>, make: () => OffscreenCanvas, into: Map<string, OffscreenCanvas>) => {
-      const canvas = make()
+    /** Builds one picture; false if a newer request came in meanwhile (or dropped it) */
+    const step = async (task: SpriteTask<M>, make: () => OffscreenCanvas | Promise<OffscreenCanvas>, into: Map<string, OffscreenCanvas>) => {
+      let canvas: OffscreenCanvas
+      try {
+        canvas = await make()
+      } catch {
+        return false
+      }
+      // Still the right picture for its key, even if a newer request came in while it was made
       into.set(task.key, canvas)
       lastByName.set(task.name, canvas)
       await breathe()
@@ -131,8 +143,15 @@ export function serveSprites<S, M>(tasksFor: (settings: S) => SpriteTask<M>[]): 
     if (id !== latest) return
     // The sharper preview of the sprite in focus (only that one is kept)
     if (focused?.hd && !hdCache.has(focused.key)) {
+      let hd: OffscreenCanvas
+      try {
+        hd = await focused.hd()
+      } catch {
+        return
+      }
+      if (id !== latest) return
       hdCache.clear()
-      hdCache.set(focused.key, focused.hd())
+      hdCache.set(focused.key, hd)
       await breathe()
       if (id !== latest) return
     }

@@ -169,17 +169,238 @@ export const CROWNS: Record<CrownId, Crown> = {
     return { x: 0, y: 0, z: level + 0.02 * c, radius: 0.36 * c }
   },
 
-  eye(parts, { base, c }) {
-    const z1 = base + 0.03 * c
-    parts.push(disc(0.12 * c, base, z1))
-    // Claws round the eye
-    for (let i = 0; i < 4; i++) {
-      const a = (i * Math.PI) / 2
-      parts.push(spike(Math.cos(a) * 0.09 * c, Math.sin(a) * 0.09 * c, z1 - 0.01, z1 + 0.24 * c, 0.026 * c, 0.28, Mat.Trim))
+  armillary(parts, { base, c }) {
+    // Three metal rings turned every way round a glowing core, on a slim stand
+    parts.push(disc(0.07 * c, base, base + 0.025 * c))
+    const oz = base + 0.17 * c
+    parts.push({ b: column(0.02 * c, base, oz - 0.06 * c), d: (x, y, z) => sdTaper('round', x, y, z, base, oz - 0.06 * c, 0.016 * c, 0.008 * c), m: Mat.Trim })
+    parts.push({ b: column(0.05 * c, oz - 0.05 * c, oz + 0.05 * c), d: (x, y, z) => sdSphere(x, y, z - oz, 0.042 * c), m: Mat.Glow })
+    const rings: [number, number, number][] = [[0.12, Math.PI / 4, 1.2], [0.104, -Math.PI / 4, 0.75], [0.088, 0, 0.25]]
+    for (const [R, phi, tilt] of rings) {
+      const cp = Math.cos(phi)
+      const sp = Math.sin(phi)
+      parts.push({
+        b: column((R + 0.012) * c, oz - (R + 0.012) * c, oz + (R + 0.012) * c),
+        d: (x, y, z) => {
+          const u = x * cp + y * sp
+          const v = -x * sp + y * cp
+          const [rv, rz] = rotX(v, z - oz, tilt)
+          return sdTorus(u, rv, rz, R * c, 0.0075 * c)
+        },
+        m: Mat.Trim,
+      })
     }
-    const oz = z1 + 0.11 * c
-    parts.push({ b: column(0.09 * c, oz - 0.09 * c, oz + 0.09 * c), d: (x, y, z) => sdSphere(x, y, z - oz, 0.085 * c), m: Mat.Eye })
-    return { x: 0, y: 0, z: oz, radius: 0.34 * c }
+    return { x: 0, y: 0, z: oz, radius: 0.36 * c }
+  },
+
+  bell(parts, { base, c }) {
+    // A bronze bell in a wooden frame, its clapper glowing
+    const top = base + 0.27 * c
+    for (const side of [-1, 1]) {
+      const cx = side * 0.095 * c
+      parts.push({ b: column(0.02 * c, base, top, cx, 0), d: (x, y, z) => sdBox(x - cx, y, z - (base + top) / 2, 0.013 * c, 0.013 * c, (top - base) / 2), m: Mat.Wood })
+    }
+    parts.push({ b: [-0.13 * c, -0.02 * c, top - 0.02 * c, 0.13 * c, 0.02 * c, top + 0.03 * c], d: (x, y, z) => sdBox(x, y, z - top - 0.005 * c, 0.125 * c, 0.016 * c, 0.016 * c), m: Mat.Wood })
+    const bTop = top - 0.03 * c
+    const bBot = bTop - 0.14 * c
+    parts.push({
+      b: column(0.09 * c, bBot - 0.01 * c, bTop + 0.03 * c),
+      d: (x, y, z) => {
+        const body = sdTaper('round', x, y, z, bBot, bTop, 0.072 * c, 0.036 * c)
+        const crown = sdSphere(x, y, z - bTop, 0.037 * c)
+        const lip = sdTorus(x, y, z - bBot - 0.006 * c, 0.07 * c, 0.009 * c)
+        const hollow = sdTaper('round', x, y, z, bBot - 0.02, bTop - 0.03 * c, 0.062 * c, 0.022 * c)
+        return Math.max(Math.min(body, crown, lip), -hollow)
+      },
+      m: Mat.Trim,
+    })
+    const cz = bBot - 0.004 * c
+    parts.push({ b: column(0.03 * c, cz - 0.03 * c, cz + 0.03 * c), d: (x, y, z) => sdSphere(x, y, z - cz, 0.024 * c), m: Mat.Glow })
+    return { x: 0, y: 0, z: bBot + 0.05 * c, radius: 0.36 * c }
+  },
+
+  mortar(parts, { base, c: size }) {
+    const c = size * 1.15
+    // A squat iron mortar tipped towards the viewer, glowing shot inside its mouth
+    parts.push(disc(0.105 * c, base, base + 0.025 * c, 'octagon'))
+    const pz = base + 0.07 * c
+    const tilt = 0.4
+    const L = 0.12 * c
+    /** Along the barrel: (across, out, up) from the breech */
+    const local = (x: number, y: number, z: number) => {
+      const u = (x + y) * Math.SQRT1_2
+      const w = (x - y) * Math.SQRT1_2
+      const [ru, rz] = rotX(u, z - pz, tilt)
+      return [w, ru, rz] as const
+    }
+    parts.push({
+      b: column(0.12 * c, base, pz + 0.16 * c),
+      d: (x, y, z) => {
+        const [w, ru, rz] = local(x, y, z)
+        const barrel = sdTaper('round', w, ru, rz, 0, L, 0.062 * c, 0.07 * c)
+        const breech = sdSphere(w, ru, rz, 0.07 * c)
+        const mouth = sdTorus(w, ru, rz - L, 0.068 * c, 0.012 * c)
+        const bore = extrude(length2(w, ru) - 0.046 * c, rz, 0.03 * c, L + 0.05 * c)
+        return Math.max(Math.min(barrel, breech, mouth), -bore) * 0.9
+      },
+      m: Mat.Trim,
+    })
+    parts.push({
+      b: column(0.06 * c, pz, pz + 0.14 * c),
+      d: (x, y, z) => {
+        const [w, ru, rz] = local(x, y, z)
+        return sdSphere(w, ru, rz - L + 0.035 * c, 0.04 * c)
+      },
+      m: Mat.Glow,
+    })
+    // Where its mouth is, in the world
+    const mu = Math.sin(tilt) * L
+    const mz = pz + Math.cos(tilt) * L
+    return { x: mu * Math.SQRT1_2, y: mu * Math.SQRT1_2, z: mz, radius: 0.3 * c }
+  },
+
+  ballista(parts, { base, c: size }) {
+    const c = size * 1.35
+    // A big crossbow on a post: a wooden stock, bent arms, a string and a bolt with a glowing head
+    parts.push(disc(0.09 * c, base, base + 0.025 * c))
+    const pz = base + 0.09 * c
+    parts.push({ b: column(0.03 * c, base, pz), d: (x, y, z) => sdBox(x, y, z - (base + pz) / 2, 0.018 * c, 0.018 * c, (pz - base) / 2), m: Mat.Wood })
+    parts.push({ b: [-0.03 * c, -0.11 * c, pz - 0.03 * c, 0.03 * c, 0.14 * c, pz + 0.03 * c], d: (x, y, z) => sdBox(x, y - 0.015 * c, z - pz, 0.017 * c, 0.105 * c, 0.013 * c), m: Mat.Wood })
+    const fy = 0.1 * c
+    const tips: [number, number, number][] = []
+    for (const side of [-1, 1]) {
+      const tx = side * 0.13 * c
+      const ty = fy - 0.055 * c
+      const tz = pz + 0.012 * c
+      tips.push([tx, ty, tz])
+      parts.push({
+        b: [Math.min(0, tx) - 0.02 * c, ty - 0.02 * c, pz - 0.02 * c, Math.max(0, tx) + 0.02 * c, fy + 0.02 * c, pz + 0.04 * c],
+        d: (x, y, z) => Math.min(
+          sdCapsule(x, y, z, 0, fy, pz + 0.008 * c, side * 0.075 * c, fy - 0.012 * c, pz + 0.012 * c, 0.012 * c),
+          sdCapsule(x, y, z, side * 0.075 * c, fy - 0.012 * c, pz + 0.012 * c, tx, ty, tz, 0.009 * c),
+        ),
+        m: Mat.Trim,
+      })
+    }
+    const ny = -0.05 * c
+    const sz = pz + 0.016 * c
+    parts.push({
+      b: [-0.15 * c, ny - 0.01 * c, pz - 0.01 * c, 0.15 * c, fy, pz + 0.03 * c],
+      d: (x, y, z) => Math.min(...tips.map(([tx, ty, tz]) => sdCapsule(x, y, z, tx, ty, tz, 0, ny, sz, 0.0028 * c))),
+      m: Mat.Trim,
+    })
+    const by = 0.15 * c
+    parts.push({ b: [-0.02 * c, ny - 0.01 * c, sz - 0.02 * c, 0.02 * c, by, sz + 0.02 * c], d: (x, y, z) => sdCapsule(x, y, z, 0, ny, sz + 0.004 * c, 0, by - 0.02 * c, sz + 0.004 * c, 0.006 * c), m: Mat.Wood })
+    const hy = by + 0.005 * c
+    parts.push({ b: [-0.02 * c, hy - 0.04 * c, sz - 0.02 * c, 0.02 * c, hy + 0.04 * c, sz + 0.025 * c], d: (x, y, z) => sdEllipsoid(x, y - hy, z - sz - 0.004 * c, 0.014 * c, 0.03 * c, 0.014 * c), m: Mat.Glow })
+    return { x: 0, y: hy, z: sz, radius: 0.24 * c }
+  },
+
+  lotus(parts, { base, c }) {
+    // Crystal petals opening round a glowing heart: an outer ring leaning out, an inner one standing up
+    parts.push(disc(0.08 * c, base, base + 0.02 * c))
+    const pz = base + 0.035 * c
+    const rings: [number, number, number, number, number][] = [
+      // count, distance out, lean, length, turn
+      [7, 0.06, 0.95, 0.095, 0],
+      [5, 0.03, 0.4, 0.085, 0.4],
+    ]
+    for (const [count, dist, lean, len, turn] of rings) {
+      for (let i = 0; i < count; i++) {
+        const a = turn + (i * 2 * Math.PI) / count
+        const ux = Math.cos(a)
+        const uy = Math.sin(a)
+        const cx = ux * dist * c
+        const cy = uy * dist * c
+        parts.push({
+          b: column((len + 0.03) * c, pz - 0.03 * c, pz + (len + 0.03) * c, cx, cy),
+          d: (x, y, z) => {
+            const out = (x - cx) * ux + (y - cy) * uy
+            const across = -(x - cx) * uy + (y - cy) * ux
+            const [ro, rz] = rotX(out, z - pz, lean)
+            // A pointed, cupped petal
+            const cup = ro + across * across * 6 / c
+            return sdEllipsoid(across, cup, rz - len * 0.5 * c, 0.036 * c * (1 - 0.6 * Math.max(0, rz / (len * c))), 0.01 * c, len * 0.55 * c) * 0.7
+          },
+          m: Mat.Gem,
+        })
+      }
+    }
+    const hz = pz + 0.06 * c
+    parts.push({ b: column(0.04 * c, hz - 0.04 * c, hz + 0.04 * c), d: (x, y, z) => sdSphere(x, y, z - hz, 0.032 * c), m: Mat.Glow })
+    return { x: 0, y: 0, z: hz, radius: 0.36 * c }
+  },
+
+  tiara(parts, { base, c }) {
+    // A king's crown: a gold band with points, pearls of light on them, a gem floating inside
+    const z0 = base + 0.005 * c
+    const z1 = z0 + 0.05 * c
+    const R = 0.09 * c
+    parts.push({
+      b: column(R + 0.01 * c, z0, z1),
+      d: (x, y, z) => Math.max(extrude(length2(x, y) - R, z, z0, z1), -(length2(x, y) - R + 0.01 * c)),
+      m: Mat.Trim,
+    })
+    parts.push({ b: column(R + 0.02 * c, z0 - 0.01 * c, z0 + 0.012 * c), d: (x, y, z) => sdTorus(x, y, z - z0 - 0.004 * c, R, 0.009 * c), m: Mat.Trim })
+    const points = 8
+    for (let i = 0; i < points; i++) {
+      const a = (i * 2 * Math.PI) / points + Math.PI / 8
+      const px = Math.cos(a) * R * 0.95
+      const py = Math.sin(a) * R * 0.95
+      const h = (i % 2 ? 0.05 : 0.075) * c
+      parts.push(spike(px, py, z1 - 0.005 * c, z1 + h, 0.02 * c, 0.15, Mat.Trim))
+      const tz = z1 + h + 0.008 * c
+      const tx = px * (1 + 0.15 * h / R)
+      const ty = py * (1 + 0.15 * h / R)
+      parts.push({ b: column(0.015 * c, tz - 0.015 * c, tz + 0.015 * c, tx, ty), d: (x, y, z) => sdSphere(x - tx, y - ty, z - tz, 0.011 * c), m: Mat.Glow })
+    }
+    const gz = z1 + 0.055 * c
+    parts.push({ b: column(0.06 * c, gz - 0.08 * c, gz + 0.08 * c), d: (x, y, z) => crystal(x * 0.94 - y * 0.34, x * 0.34 + y * 0.94, z - gz, 0.045 * c, 0.07 * c, 0.045 * c), m: Mat.Gem })
+    return { x: 0, y: 0, z: gz, radius: 0.36 * c }
+  },
+
+  horns(parts, { base, c }) {
+    // Two great horns curling up from a skull-like boss, a dark fire burning between them
+    parts.push(disc(0.09 * c, base, base + 0.025 * c, 'hexagon'))
+    const bz = base + 0.06 * c
+    parts.push({ b: column(0.07 * c, base, bz + 0.05 * c), d: (x, y, z) => sdEllipsoid(x, y, z - bz, 0.065 * c, 0.065 * c, 0.045 * c), m: Mat.Rock })
+    for (const side of [-1, 1]) {
+      // Along a curve going out to the side, up, then curling back in at the tip
+      const pts: [number, number, number, number][] = []
+      const n = 7
+      for (let k = 0; k <= n; k++) {
+        const t = k / n
+        const out = (0.05 + 0.1 * Math.sin(t * Math.PI * 0.8)) * c
+        const up = (0.02 + 0.2 * t) * c
+        const r = (0.03 * (1 - t) + 0.003) * c
+        const ux = (side * out) * Math.SQRT1_2
+        pts.push([ux, -ux, bz + up, r])
+      }
+      parts.push({
+        b: [Math.min(...pts.map(p => p[0])) - 0.04 * c, Math.min(...pts.map(p => p[1])) - 0.04 * c, bz - 0.02 * c, Math.max(...pts.map(p => p[0])) + 0.04 * c, Math.max(...pts.map(p => p[1])) + 0.04 * c, bz + 0.25 * c],
+        d: (x, y, z) => {
+          let d = Infinity
+          for (let k = 0; k < n; k++) {
+            const [ax, ay, az, ar] = pts[k]
+            const [bx, by, bz2, br] = pts[k + 1]
+            d = Math.min(d, sdCapsule(x, y, z, ax, ay, az, bx, by, bz2, (ar + br) / 2))
+          }
+          // Ridges round the horn
+          return d + Math.sin(z * 260 / c) * 0.0015 * c
+        },
+        m: Mat.Trim,
+      })
+    }
+    const fz = bz + 0.11 * c
+    parts.push({
+      b: column(0.06 * c, bz, fz + 0.1 * c),
+      d: (x, y, z) => {
+        const narrow = 1 - Math.max(0, Math.min(1, (z - fz) / (0.1 * c))) * 0.8
+        return (sdEllipsoid(x, y, z - fz, 0.042 * c * narrow, 0.042 * c * narrow, 0.09 * c) + (noise3(x * 40, y * 40, z * 20, 3) - 0.5) * 0.02 * c) * 0.6
+      },
+      m: Mat.Dark,
+    })
+    return { x: 0, y: 0, z: fz, radius: 0.34 * c }
   },
 
   coil(parts, { base, c }) {

@@ -4,7 +4,8 @@
  */
 
 export type TowerShape = 'square' | 'diamond' | 'hexagon' | 'octagon' | 'round'
-export const SHAPES: TowerShape[] = ['square', 'diamond', 'hexagon', 'octagon', 'round']
+/** The shapes offered ('diamond' is no longer offered: a saved one becomes a square) */
+export const SHAPES: TowerShape[] = ['square', 'hexagon', 'octagon', 'round']
 
 /**
  * How a tower is put together:
@@ -16,12 +17,21 @@ export type TowerForm = 'keep' | 'tiered' | 'spire' | 'floating' | 'shrine'
 export const FORMS: TowerForm[] = ['keep', 'tiered', 'spire', 'floating', 'shrine']
 
 /** What finishes the body: the crown stands on it, or under it (cupola) */
-export type TowerTop = 'battlements' | 'floor' | 'dome' | 'glass' | 'onion' | 'cupola' | 'roof'
-export const TOPS: TowerTop[] = ['battlements', 'floor', 'dome', 'glass', 'onion', 'cupola', 'roof']
+export type TowerTop = 'battlements' | 'floor' | 'dome' | 'glass' | 'onion' | 'cupola' | 'roof' | 'turrets' | 'pagoda' | 'thorns' | 'stepped' | 'halo'
+export const TOPS: TowerTop[] = ['battlements', 'turrets', 'floor', 'stepped', 'dome', 'glass', 'onion', 'cupola', 'roof', 'pagoda', 'thorns', 'halo']
 
-/** The thing that shoots: what stands on top and glows */
-export type CrownId = 'brazier' | 'crystal' | 'cauldron' | 'coil' | 'orb' | 'gem' | 'eye' | 'cannon' | 'finial'
-export const CROWN_IDS: CrownId[] = ['brazier', 'crystal', 'gem', 'orb', 'coil', 'cauldron', 'cannon', 'finial', 'eye']
+/** The thing that shoots: what stands on top and glows ('eye' is no longer made: a saved one becomes 'armillary') */
+export type CrownId =
+  | 'brazier' | 'crystal' | 'cauldron' | 'coil' | 'orb' | 'gem' | 'cannon' | 'finial'
+  | 'armillary' | 'bell' | 'mortar' | 'ballista' | 'lotus' | 'tiara' | 'horns'
+export const CROWN_IDS: CrownId[] = ['brazier', 'crystal', 'gem', 'orb', 'coil', 'cauldron', 'cannon', 'finial', 'armillary', 'bell', 'mortar', 'ballista', 'lotus', 'tiara', 'horns']
+
+/**
+ * What the walls are made of: bricks; big cut blocks; rubble (rough stones of every size); plaster (smooth, the
+ * bricks showing where it fell off); planks (a wooden tower with iron bands)
+ */
+export type Masonry = 'bricks' | 'blocks' | 'rubble' | 'plaster' | 'planks'
+export const MASONRIES: Masonry[] = ['bricks', 'blocks', 'rubble', 'plaster', 'planks']
 
 /** Size and detail: small, medium, large */
 export type Level = 1 | 2 | 3
@@ -48,8 +58,16 @@ export interface TowerExtras {
   rings: boolean
   buttresses: boolean
   flags: boolean
+  /** Ivy climbing the walls from the ground */
+  vines: boolean
+  /** Long cloth banners with a glowing rune, hanging on the front walls */
+  banners: boolean
+  /** A railed gallery round the body */
+  balcony: boolean
+  /** Iron spikes round the plinth, pointing out */
+  spikes: boolean
 }
-export const EXTRA_IDS: (keyof TowerExtras)[] = ['windows', 'runes', 'cracks', 'circle', 'shards', 'rings', 'buttresses', 'flags']
+export const EXTRA_IDS: (keyof TowerExtras)[] = ['windows', 'runes', 'cracks', 'circle', 'shards', 'rings', 'buttresses', 'flags', 'vines', 'banners', 'balcony', 'spikes']
 
 export interface TowerDef {
   /** Stable id (the list's key) */
@@ -65,6 +83,7 @@ export interface TowerDef {
   upperShape: TowerShape
   top: TowerTop
   crown: CrownId
+  masonry: Masonry
   colors: TowerColors
   extras: TowerExtras
   /** 1 = default */
@@ -104,7 +123,20 @@ export const PALETTES: { id: string; name: string; colors: TowerColors }[] = [
   { id: 'night', name: 'Tun', colors: { stone: ['#2f3442', '#5d6478'], trim: '#8a93a8', accent: '#1b2238', glow: '#6c8cff' } },
 ]
 
-const NO_EXTRAS: TowerExtras = { windows: false, runes: false, cracks: false, circle: false, shards: false, rings: false, buttresses: false, flags: false }
+const NO_EXTRAS: TowerExtras = {
+  windows: false,
+  runes: false,
+  cracks: false,
+  circle: false,
+  shards: false,
+  rings: false,
+  buttresses: false,
+  flags: false,
+  vines: false,
+  banners: false,
+  balcony: false,
+  spikes: false,
+}
 
 export const newId = () => Math.random().toString(36).slice(2, 10)
 
@@ -120,6 +152,7 @@ export function newTower(fields: Partial<TowerDef> & { name: string }): TowerDef
     upperShape: 'square',
     top: level === 1 ? 'floor' : 'battlements',
     crown: 'brazier',
+    masonry: 'bricks',
     colors: structuredClone(PALETTES[0].colors),
     extras: { ...NO_EXTRAS, windows: level >= 2, runes: true, circle: level >= 2, shards: level >= 2, cracks: level === 3 },
     width: 1,
@@ -188,12 +221,12 @@ const RECIPES: Record<string, Recipe[]> = {
     [3, 'floating', 'octagon', 'round', 'glass', 'cauldron', { shards: true }],
   ],
   blood: [
-    [1, 'keep', 'diamond', 'diamond', 'floor', 'gem'],
-    [1, 'keep', 'diamond', 'diamond', 'battlements', 'gem'],
+    [1, 'keep', 'square', 'square', 'floor', 'gem'],
+    [1, 'keep', 'hexagon', 'hexagon', 'battlements', 'gem'],
     [2, 'spire', 'octagon', 'octagon', 'onion', 'gem'],
-    [2, 'shrine', 'diamond', 'octagon', 'battlements', 'gem'],
+    [2, 'shrine', 'square', 'octagon', 'battlements', 'gem'],
     [3, 'tiered', 'square', 'octagon', 'onion', 'gem', { buttresses: true }],
-    [3, 'spire', 'diamond', 'octagon', 'glass', 'gem', { rings: true }],
+    [3, 'spire', 'hexagon', 'octagon', 'glass', 'gem', { rings: true }],
   ],
   electric: [
     [1, 'keep', 'hexagon', 'hexagon', 'floor', 'coil'],
@@ -205,8 +238,8 @@ const RECIPES: Record<string, Recipe[]> = {
   ],
   void: [
     [1, 'keep', 'octagon', 'octagon', 'floor', 'orb'],
-    [1, 'floating', 'octagon', 'diamond', 'floor', 'orb'],
-    [2, 'floating', 'octagon', 'diamond', 'battlements', 'orb'],
+    [1, 'floating', 'octagon', 'hexagon', 'floor', 'orb'],
+    [2, 'floating', 'octagon', 'hexagon', 'battlements', 'orb'],
     [2, 'shrine', 'hexagon', 'round', 'battlements', 'orb'],
     [3, 'floating', 'round', 'round', 'glass', 'orb'],
     [3, 'shrine', 'octagon', 'round', 'battlements', 'orb', { shards: true }],
